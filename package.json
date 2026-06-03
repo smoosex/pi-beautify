@@ -1,0 +1,43 @@
+{
+  "name": "@smoose/pi-beautify",
+  "version": "0.1.0",
+  "description": "Small visual polish extensions for pi coding agent",
+  "type": "module",
+  "files": [
+    "src/**/*.ts",
+    "README.md",
+    "package.json"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "beautify"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/smoosex/pi-beautify.git"
+  },
+  "homepage": "https://github.com/smoosex/pi-beautify",
+  "bugs": {
+    "url": "https://github.com/smoosex/pi-beautify/issues"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "typescript": "^6.0.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}
