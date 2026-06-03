@@ -1,6 +1,6 @@
 import { CustomEditor, type ExtensionAPI, type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { truncateToWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
+import { getKeybindings, matchesKey, truncateToWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import { existsSync, readFileSync } from "node:fs";
 import { extname } from "node:path";
 
@@ -12,6 +12,7 @@ interface Attachment {
 
 const CLIPBOARD_PATH_RE = /(?:[^\s"'`<>]+[\\/])?pi-clipboard-[0-9a-f-]+\.(?:png|jpe?g|webp|gif)/gi;
 const TOKEN_RE = /\[image(\d+)\]/g;
+const TOKEN_LINE_RE = /\[image\d+\]/g;
 
 function mimeTypeForPath(path: string): string {
   const ext = extname(path).toLowerCase();
@@ -45,6 +46,7 @@ class BeautifyEditor extends CustomEditor {
 
   handleInput(data: string): void {
     const isImagePaste = this.appKeybindings.matches(data, "app.clipboard.pasteImage");
+    if (this.deleteImageTokenAtCursor(data)) return;
     super.handleInput(data);
     if (isImagePaste) this.scheduleClipboardPathScan();
   }
@@ -69,6 +71,50 @@ class BeautifyEditor extends CustomEditor {
         this.replaceClipboardPaths();
       }, delay),
     );
+  }
+
+  private deleteImageTokenAtCursor(data: string): boolean {
+    const keybindings = getKeybindings();
+    const backward = keybindings.matches(data, "tui.editor.deleteCharBackward") || matchesKey(data, "shift+backspace");
+    const forward = keybindings.matches(data, "tui.editor.deleteCharForward") || matchesKey(data, "shift+delete");
+    if (!backward && !forward) return false;
+
+    const editor = this as unknown as {
+      state: { lines: string[]; cursorLine: number; cursorCol: number };
+      historyIndex: number;
+      lastAction: string | null;
+      pushUndoSnapshot: () => void;
+      setCursorCol: (col: number) => void;
+    };
+    const line = editor.state.lines[editor.state.cursorLine] || "";
+    const range = this.findImageTokenDeleteRange(line, editor.state.cursorCol, backward);
+    if (!range) return false;
+
+    editor.historyIndex = -1;
+    editor.lastAction = null;
+    editor.pushUndoSnapshot();
+    editor.state.lines[editor.state.cursorLine] = line.slice(0, range.start) + line.slice(range.end);
+    editor.setCursorCol(range.start);
+    this.attachments.delete(range.token);
+    if (this.onChange) this.onChange(this.getText());
+    this.tui.requestRender();
+    return true;
+  }
+
+  private findImageTokenDeleteRange(line: string, cursorCol: number, backward: boolean): { start: number; end: number; token: string } | undefined {
+    for (const match of line.matchAll(TOKEN_LINE_RE)) {
+      const token = match[0];
+      const start = match.index;
+      let end = start + token.length;
+      if (backward) {
+        if (start < cursorCol && cursorCol <= end) return { start, end, token };
+        if (cursorCol === end + 1 && line[end] === " ") return { start, end: end + 1, token };
+      } else if (start <= cursorCol && cursorCol < end) {
+        if (line[end] === " ") end += 1;
+        return { start, end, token };
+      }
+    }
+    return undefined;
   }
 
   private replaceClipboardPaths(): void {
