@@ -49,6 +49,10 @@ class BeautifyEditor extends CustomEditor {
     if (isImagePaste) this.scheduleClipboardPathScan();
   }
 
+  insertTextAtCursor(text: string): void {
+    super.insertTextAtCursor(this.replaceClipboardPathsInText(text));
+  }
+
   render(width: number): string[] {
     let lines = super.render(width);
     const currentTheme = this.getTheme();
@@ -71,15 +75,23 @@ class BeautifyEditor extends CustomEditor {
     const current = this.getText();
     let changed = false;
     const next = current.replace(CLIPBOARD_PATH_RE, (path) => {
-      const token = imageChip(this.nextId++);
-      this.attachments.set(token, { token, path, mimeType: mimeTypeForPath(path) });
       changed = true;
-      return `${token} `;
+      return this.createImageToken(path);
     });
     if (changed) {
       this.setText(next);
       this.tui.requestRender();
     }
+  }
+
+  private replaceClipboardPathsInText(text: string): string {
+    return text.replace(CLIPBOARD_PATH_RE, (path) => this.createImageToken(path));
+  }
+
+  private createImageToken(path: string): string {
+    const token = imageChip(this.nextId++);
+    this.attachments.set(token, { token, path, mimeType: mimeTypeForPath(path) });
+    return `${token} `;
   }
 }
 
