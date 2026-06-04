@@ -39,8 +39,6 @@ interface EditorInternals {
 }
 
 class ImageTokenController {
-  private nextId = 1;
-
   constructor(private readonly attachments: Map<string, Attachment>) {}
 
   renderChips(lines: string[], theme: Theme, width: number): string[] {
@@ -51,16 +49,18 @@ class ImageTokenController {
     return rendered.map((line) => truncateToWidth(line, width, ""));
   }
 
-  replaceClipboardPathsInText(text: string): string {
-    return text.replace(CLIPBOARD_PATH_RE, (path) => this.createImageToken(path));
+  replaceClipboardPathsInText(text: string, existingText = ""): string {
+    const usedIds = this.collectUsedIds(`${existingText}\n${text}`);
+    return text.replace(CLIPBOARD_PATH_RE, (path) => this.createImageToken(path, usedIds));
   }
 
   replaceClipboardPathsInEditor(editor: EditorComponent, tui: TUI): void {
     const current = editor.getText();
+    const usedIds = this.collectUsedIds(current);
     let changed = false;
     const next = current.replace(CLIPBOARD_PATH_RE, (path) => {
       changed = true;
-      return this.createImageToken(path);
+      return this.createImageToken(path, usedIds);
     });
     if (!changed) return;
     editor.setText(next);
@@ -107,8 +107,17 @@ class ImageTokenController {
     return undefined;
   }
 
-  private createImageToken(path: string): string {
-    const token = imageChip(this.nextId++);
+  private collectUsedIds(text: string): Set<number> {
+    const usedIds = new Set<number>();
+    for (const match of text.matchAll(TOKEN_RE)) usedIds.add(Number(match[1]));
+    return usedIds;
+  }
+
+  private createImageToken(path: string, usedIds: Set<number>): string {
+    let id = 1;
+    while (usedIds.has(id)) id++;
+    usedIds.add(id);
+    const token = imageChip(id);
     this.attachments.set(token, { token, path, mimeType: mimeTypeForPath(path) });
     return `${token} `;
   }
@@ -135,7 +144,7 @@ class BeautifyEditor extends CustomEditor {
   }
 
   insertTextAtCursor(text: string): void {
-    super.insertTextAtCursor(this.imageTokens.replaceClipboardPathsInText(text));
+    super.insertTextAtCursor(this.imageTokens.replaceClipboardPathsInText(text, this.getText()));
   }
 
   render(width: number): string[] {
@@ -221,7 +230,7 @@ class BeautifyEditorWrapper implements EditorComponent {
   }
 
   insertTextAtCursor(text: string): void {
-    const next = this.imageTokens.replaceClipboardPathsInText(text);
+    const next = this.imageTokens.replaceClipboardPathsInText(text, this.inner.getText());
     if (this.inner.insertTextAtCursor) {
       this.inner.insertTextAtCursor(next);
       return;
