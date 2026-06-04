@@ -1,6 +1,6 @@
-import { CustomEditor, type ExtensionAPI, type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, type AppKeybinding, type ExtensionAPI, type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { getKeybindings, matchesKey, truncateToWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
+import { getKeybindings, matchesKey, truncateToWidth, type AutocompleteProvider, type EditorComponent, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import { existsSync, readFileSync } from "node:fs";
 import { extname } from "node:path";
 
@@ -30,74 +30,64 @@ function displayChip(token: string, theme: Theme): string {
   return theme.fg("toolDiffAdded", theme.inverse(token));
 }
 
-class BeautifyEditor extends CustomEditor {
+interface EditorInternals {
+  state: { lines: string[]; cursorLine: number; cursorCol: number };
+  historyIndex: number;
+  lastAction: string | null;
+  pushUndoSnapshot: () => void;
+  setCursorCol: (col: number) => void;
+}
+
+class ImageTokenController {
   private nextId = 1;
-  private scanTimers: Array<ReturnType<typeof setTimeout>> = [];
 
-  constructor(
-    tui: TUI,
-    theme: EditorTheme,
-    private readonly appKeybindings: KeybindingsManager,
-    private readonly attachments: Map<string, Attachment>,
-    private readonly getTheme: () => Theme,
-  ) {
-    super(tui, theme, appKeybindings);
-  }
+  constructor(private readonly attachments: Map<string, Attachment>) {}
 
-  handleInput(data: string): void {
-    const isImagePaste = this.appKeybindings.matches(data, "app.clipboard.pasteImage");
-    if (this.deleteImageTokenAtCursor(data)) return;
-    super.handleInput(data);
-    if (isImagePaste) this.scheduleClipboardPathScan();
-  }
-
-  insertTextAtCursor(text: string): void {
-    super.insertTextAtCursor(this.replaceClipboardPathsInText(text));
-  }
-
-  render(width: number): string[] {
-    let lines = super.render(width);
-    const currentTheme = this.getTheme();
+  renderChips(lines: string[], theme: Theme, width: number): string[] {
+    let rendered = lines;
     for (const attachment of this.attachments.values()) {
-      lines = lines.map((line) => line.replaceAll(attachment.token, displayChip(attachment.token, currentTheme)));
+      rendered = rendered.map((line) => line.replaceAll(attachment.token, displayChip(attachment.token, theme)));
     }
-    return lines.map((line) => truncateToWidth(line, width, ""));
+    return rendered.map((line) => truncateToWidth(line, width, ""));
   }
 
-  private scheduleClipboardPathScan(): void {
-    for (const timer of this.scanTimers) clearTimeout(timer);
-    this.scanTimers = [80, 250, 600].map((delay) =>
-      setTimeout(() => {
-        this.replaceClipboardPaths();
-      }, delay),
-    );
+  replaceClipboardPathsInText(text: string): string {
+    return text.replace(CLIPBOARD_PATH_RE, (path) => this.createImageToken(path));
   }
 
-  private deleteImageTokenAtCursor(data: string): boolean {
+  replaceClipboardPathsInEditor(editor: EditorComponent, tui: TUI): void {
+    const current = editor.getText();
+    let changed = false;
+    const next = current.replace(CLIPBOARD_PATH_RE, (path) => {
+      changed = true;
+      return this.createImageToken(path);
+    });
+    if (!changed) return;
+    editor.setText(next);
+    tui.requestRender();
+  }
+
+  deleteImageTokenAtCursor(editor: EditorComponent, data: string, tui: TUI): boolean {
     const keybindings = getKeybindings();
     const backward = keybindings.matches(data, "tui.editor.deleteCharBackward") || matchesKey(data, "shift+backspace");
     const forward = keybindings.matches(data, "tui.editor.deleteCharForward") || matchesKey(data, "shift+delete");
     if (!backward && !forward) return false;
 
-    const editor = this as unknown as {
-      state: { lines: string[]; cursorLine: number; cursorCol: number };
-      historyIndex: number;
-      lastAction: string | null;
-      pushUndoSnapshot: () => void;
-      setCursorCol: (col: number) => void;
-    };
-    const line = editor.state.lines[editor.state.cursorLine] || "";
-    const range = this.findImageTokenDeleteRange(line, editor.state.cursorCol, backward);
+    const writableEditor = editor as unknown as Partial<EditorInternals>;
+    if (!writableEditor.state || !writableEditor.pushUndoSnapshot || !writableEditor.setCursorCol) return false;
+
+    const line = writableEditor.state.lines[writableEditor.state.cursorLine] || "";
+    const range = this.findImageTokenDeleteRange(line, writableEditor.state.cursorCol, backward);
     if (!range) return false;
 
-    editor.historyIndex = -1;
-    editor.lastAction = null;
-    editor.pushUndoSnapshot();
-    editor.state.lines[editor.state.cursorLine] = line.slice(0, range.start) + line.slice(range.end);
-    editor.setCursorCol(range.start);
+    writableEditor.historyIndex = -1;
+    writableEditor.lastAction = null;
+    writableEditor.pushUndoSnapshot();
+    writableEditor.state.lines[writableEditor.state.cursorLine] = line.slice(0, range.start) + line.slice(range.end);
+    writableEditor.setCursorCol(range.start);
     this.attachments.delete(range.token);
-    if (this.onChange) this.onChange(this.getText());
-    this.tui.requestRender();
+    editor.onChange?.(editor.getText());
+    tui.requestRender();
     return true;
   }
 
@@ -117,27 +107,210 @@ class BeautifyEditor extends CustomEditor {
     return undefined;
   }
 
-  private replaceClipboardPaths(): void {
-    const current = this.getText();
-    let changed = false;
-    const next = current.replace(CLIPBOARD_PATH_RE, (path) => {
-      changed = true;
-      return this.createImageToken(path);
-    });
-    if (changed) {
-      this.setText(next);
-      this.tui.requestRender();
-    }
-  }
-
-  private replaceClipboardPathsInText(text: string): string {
-    return text.replace(CLIPBOARD_PATH_RE, (path) => this.createImageToken(path));
-  }
-
   private createImageToken(path: string): string {
     const token = imageChip(this.nextId++);
     this.attachments.set(token, { token, path, mimeType: mimeTypeForPath(path) });
     return `${token} `;
+  }
+}
+
+class BeautifyEditor extends CustomEditor {
+  private scanTimers: Array<ReturnType<typeof setTimeout>> = [];
+
+  constructor(
+    tui: TUI,
+    theme: EditorTheme,
+    private readonly appKeybindings: KeybindingsManager,
+    private readonly imageTokens: ImageTokenController,
+    private readonly getTheme: () => Theme,
+  ) {
+    super(tui, theme, appKeybindings);
+  }
+
+  handleInput(data: string): void {
+    const isImagePaste = this.appKeybindings.matches(data, "app.clipboard.pasteImage");
+    if (this.imageTokens.deleteImageTokenAtCursor(this, data, this.tui)) return;
+    super.handleInput(data);
+    if (isImagePaste) this.scheduleClipboardPathScan();
+  }
+
+  insertTextAtCursor(text: string): void {
+    super.insertTextAtCursor(this.imageTokens.replaceClipboardPathsInText(text));
+  }
+
+  render(width: number): string[] {
+    return this.imageTokens.renderChips(super.render(width), this.getTheme(), width);
+  }
+
+  private scheduleClipboardPathScan(): void {
+    for (const timer of this.scanTimers) clearTimeout(timer);
+    this.scanTimers = [80, 250, 600].map((delay) =>
+      setTimeout(() => {
+        this.imageTokens.replaceClipboardPathsInEditor(this, this.tui);
+      }, delay),
+    );
+  }
+}
+
+class BeautifyEditorWrapper implements EditorComponent {
+  actionHandlers = new Map<AppKeybinding, () => void>();
+  private scanTimers: Array<ReturnType<typeof setTimeout>> = [];
+  private _onSubmit: ((text: string) => void) | undefined;
+  private _onChange: ((text: string) => void) | undefined;
+  onEscape: (() => void) | undefined;
+  onCtrlD: (() => void) | undefined;
+  onPasteImage: (() => void) | undefined;
+  onExtensionShortcut: ((data: string) => boolean) | undefined;
+
+  constructor(
+    private readonly inner: EditorComponent,
+    private readonly tui: TUI,
+    private readonly appKeybindings: KeybindingsManager,
+    private readonly imageTokens: ImageTokenController,
+    private readonly getTheme: () => Theme,
+  ) {}
+
+  get focused(): boolean {
+    return Boolean((this.inner as EditorComponent & { focused?: boolean }).focused);
+  }
+
+  set focused(value: boolean) {
+    (this.inner as EditorComponent & { focused?: boolean }).focused = value;
+  }
+
+  get borderColor(): ((str: string) => string) | undefined {
+    return this.inner.borderColor;
+  }
+
+  set borderColor(value: ((str: string) => string) | undefined) {
+    this.inner.borderColor = value;
+  }
+
+  get onSubmit(): ((text: string) => void) | undefined {
+    return this._onSubmit;
+  }
+
+  set onSubmit(handler: ((text: string) => void) | undefined) {
+    this._onSubmit = handler;
+    this.inner.onSubmit = handler;
+  }
+
+  get onChange(): ((text: string) => void) | undefined {
+    return this._onChange;
+  }
+
+  set onChange(handler: ((text: string) => void) | undefined) {
+    this._onChange = handler;
+    this.inner.onChange = handler;
+  }
+
+  getText(): string {
+    return this.inner.getText();
+  }
+
+  setText(text: string): void {
+    this.inner.setText(text);
+  }
+
+  getExpandedText(): string {
+    return this.inner.getExpandedText?.() ?? this.inner.getText();
+  }
+
+  addToHistory(text: string): void {
+    this.inner.addToHistory?.(text);
+  }
+
+  insertTextAtCursor(text: string): void {
+    const next = this.imageTokens.replaceClipboardPathsInText(text);
+    if (this.inner.insertTextAtCursor) {
+      this.inner.insertTextAtCursor(next);
+      return;
+    }
+    this.inner.setText(this.inner.getText() + next);
+    this.inner.onChange?.(this.inner.getText());
+  }
+
+  setAutocompleteProvider(provider: AutocompleteProvider): void {
+    this.inner.setAutocompleteProvider?.(provider);
+  }
+
+  setPaddingX(padding: number): void {
+    this.inner.setPaddingX?.(padding);
+  }
+
+  setAutocompleteMaxVisible(maxVisible: number): void {
+    this.inner.setAutocompleteMaxVisible?.(maxVisible);
+  }
+
+  onAction(action: AppKeybinding, handler: () => void): void {
+    this.actionHandlers.set(action, handler);
+  }
+
+  invalidate(): void {
+    this.inner.invalidate?.();
+  }
+
+  render(width: number): string[] {
+    return this.imageTokens.renderChips(this.inner.render(width), this.getTheme(), width);
+  }
+
+  handleInput(data: string): void {
+    const isImagePaste = this.appKeybindings.matches(data, "app.clipboard.pasteImage");
+    if (this.onExtensionShortcut?.(data)) return;
+    if (this.imageTokens.deleteImageTokenAtCursor(this.inner, data, this.tui)) return;
+    if (isImagePaste) {
+      this.onPasteImage?.();
+      this.scheduleClipboardPathScan();
+      return;
+    }
+    if (this.handleAppAction(data)) return;
+    this.inner.handleInput(data);
+  }
+
+  private handleAppAction(data: string): boolean {
+    if (this.appKeybindings.matches(data, "app.interrupt")) {
+      if (!this.isShowingAutocomplete()) {
+        const handler = this.onEscape ?? this.actionHandlers.get("app.interrupt");
+        if (handler) {
+          handler();
+          return true;
+        }
+      }
+      return false;
+    }
+
+    if (this.appKeybindings.matches(data, "app.exit")) {
+      if (this.getText().length === 0) {
+        const handler = this.onCtrlD ?? this.actionHandlers.get("app.exit");
+        if (handler) {
+          handler();
+          return true;
+        }
+      }
+    }
+
+    for (const [action, handler] of this.actionHandlers) {
+      if (action !== "app.interrupt" && action !== "app.exit" && this.appKeybindings.matches(data, action)) {
+        handler();
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private isShowingAutocomplete(): boolean {
+    const inner = this.inner as EditorComponent & { isShowingAutocomplete?: () => boolean };
+    return inner.isShowingAutocomplete?.() ?? false;
+  }
+
+  private scheduleClipboardPathScan(): void {
+    for (const timer of this.scanTimers) clearTimeout(timer);
+    this.scanTimers = [80, 250, 600].map((delay) =>
+      setTimeout(() => {
+        this.imageTokens.replaceClipboardPathsInEditor(this.inner, this.tui);
+      }, delay),
+    );
   }
 }
 
@@ -170,7 +343,14 @@ export default function piBeautify(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     if (!ctx.hasUI) return;
     attachments.clear();
-    ctx.ui.setEditorComponent((tui, theme, keybindings) => new BeautifyEditor(tui, theme, keybindings, attachments, () => ctx.ui.theme));
+    const previousEditorFactory = ctx.ui.getEditorComponent();
+    const imageTokens = new ImageTokenController(attachments);
+    ctx.ui.setEditorComponent((tui, theme, keybindings) => {
+      if (!previousEditorFactory) {
+        return new BeautifyEditor(tui, theme, keybindings, imageTokens, () => ctx.ui.theme);
+      }
+      return new BeautifyEditorWrapper(previousEditorFactory(tui, theme, keybindings), tui, keybindings, imageTokens, () => ctx.ui.theme);
+    });
     ctx.ui.setStatus("pi-beautify", ctx.ui.theme.fg("dim", "beautify"));
   });
 
