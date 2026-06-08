@@ -1,26 +1,14 @@
 import { CustomEditor, type AppKeybinding, type ExtensionAPI, type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
-import type { ImageContent } from "@earendil-works/pi-ai";
 import { getKeybindings, matchesKey, truncateToWidth, type AutocompleteProvider, type EditorComponent, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
-import { existsSync, readFileSync } from "node:fs";
-import { extname } from "node:path";
 
 interface Attachment {
   token: string;
   path: string;
-  mimeType: string;
 }
 
 const CLIPBOARD_PATH_RE = /(?:[^\s"'`<>]+[\\/])?pi-clipboard-[0-9a-f-]+\.(?:png|jpe?g|webp|gif)/gi;
 const TOKEN_RE = /\[image(\d+)\]/g;
 const TOKEN_LINE_RE = /\[image\d+\]/g;
-
-function mimeTypeForPath(path: string): string {
-  const ext = extname(path).toLowerCase();
-  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
-  if (ext === ".webp") return "image/webp";
-  if (ext === ".gif") return "image/gif";
-  return "image/png";
-}
 
 function imageChip(id: number): string {
   return `[image${id}]`;
@@ -118,7 +106,7 @@ class ImageTokenController {
     while (usedIds.has(id)) id++;
     usedIds.add(id);
     const token = imageChip(id);
-    this.attachments.set(token, { token, path, mimeType: mimeTypeForPath(path) });
+    this.attachments.set(token, { token, path });
     return `${token} `;
   }
 }
@@ -337,15 +325,6 @@ function collectImageAttachments(text: string, attachments: Map<string, Attachme
   return selected;
 }
 
-function toImageContent(attachment: Attachment): ImageContent | undefined {
-  if (!existsSync(attachment.path)) return undefined;
-  return {
-    type: "image",
-    data: readFileSync(attachment.path).toString("base64"),
-    mimeType: attachment.mimeType,
-  };
-}
-
 export default function piBeautify(pi: ExtensionAPI) {
   const attachments = new Map<string, Attachment>();
 
@@ -368,23 +347,17 @@ export default function piBeautify(pi: ExtensionAPI) {
     if (ctx.hasUI) ctx.ui.setStatus("pi-beautify", undefined);
   });
 
-  pi.on("input", async (event, ctx) => {
+  pi.on("input", async (event) => {
     const selected = collectImageAttachments(event.text, attachments);
     if (selected.length === 0) return { action: "continue" };
 
-    const converted = selected.map(toImageContent).filter((image): image is ImageContent => image !== undefined);
-    if (converted.length === 0) {
-      if (ctx.hasUI) ctx.ui.notify("pi-beautify: image file disappeared before submit", "warning");
-      return { action: "continue" };
-    }
-
+    const text = event.text.replace(TOKEN_RE, (full, id) => attachments.get(imageChip(Number(id)))?.path ?? full);
     for (const attachment of selected) attachments.delete(attachment.token);
 
-    const text = event.text.replace(TOKEN_RE, (_full, id) => `[attached image ${id}]`);
     return {
       action: "transform",
       text,
-      images: [...(event.images ?? []), ...converted],
+      images: event.images,
     };
   });
 }
