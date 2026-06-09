@@ -1,5 +1,5 @@
 import { CustomEditor, type AppKeybinding, type ExtensionAPI, type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, matchesKey, truncateToWidth, type AutocompleteProvider, type EditorComponent, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
+import { getKeybindings, Markdown, matchesKey, truncateToWidth, type AutocompleteProvider, type EditorComponent, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 
 interface Attachment {
   token: string;
@@ -9,6 +9,86 @@ interface Attachment {
 const CLIPBOARD_PATH_RE = /(?:[^\s"'`<>]+[\\/])?pi-clipboard-[0-9a-f-]+\.(?:png|jpe?g|webp|gif)/gi;
 const TOKEN_RE = /\[image(\d+)\]/g;
 const TOKEN_LINE_RE = /\[image\d+\]/g;
+const MARKDOWN_PATCH_STATE = Symbol.for("smoose.pi-beautify.markdown.patch");
+const PLAIN_CODE_LANGS = new Set(["", "text", "plain", "plaintext"]);
+
+interface MarkdownCodeToken {
+  type: "code";
+  lang?: string;
+  text?: string;
+}
+
+interface BeautifyMarkdownTheme {
+  codeBlock: (text: string) => string;
+  codeBlockIndent?: string;
+  highlightCode?: (code: string, lang?: string) => string[];
+}
+
+interface MarkdownRuntime {
+  theme: BeautifyMarkdownTheme;
+  applyDefaultStyle?: (text: string) => string;
+}
+
+type MarkdownRenderToken = (this: MarkdownRuntime, token: unknown, width: number, nextTokenType?: string, styleContext?: unknown) => string[];
+
+interface MarkdownPatchState {
+  installed: true;
+  original: MarkdownRenderToken;
+  renderCodeToken: (instance: MarkdownRuntime, token: MarkdownCodeToken, nextTokenType?: string) => string[];
+}
+
+type PatchedMarkdownPrototype = {
+  renderToken?: MarkdownRenderToken;
+  [key: symbol]: unknown;
+};
+
+function isMarkdownCodeToken(token: unknown): token is MarkdownCodeToken {
+  return typeof token === "object" && token !== null && (token as { type?: unknown }).type === "code";
+}
+
+function renderCodeTokenWithoutFences(instance: MarkdownRuntime, token: MarkdownCodeToken, nextTokenType?: string): string[] {
+  const raw = typeof token.text === "string" ? token.text : "";
+  const lang = typeof token.lang === "string" ? token.lang.trim().toLowerCase() : "";
+  const lines: string[] = [];
+
+  if (PLAIN_CODE_LANGS.has(lang)) {
+    for (const line of raw.split("\n")) lines.push(instance.applyDefaultStyle?.(line) ?? line);
+  } else if (instance.theme.highlightCode) {
+    const indent = instance.theme.codeBlockIndent ?? "  ";
+    for (const line of instance.theme.highlightCode(raw, token.lang)) lines.push(`${indent}${line}`);
+  } else {
+    const indent = instance.theme.codeBlockIndent ?? "  ";
+    for (const line of raw.split("\n")) lines.push(`${indent}${instance.theme.codeBlock(line)}`);
+  }
+
+  if (nextTokenType && nextTokenType !== "space") lines.push("");
+  return lines;
+}
+
+function installMarkdownFencePatch(): void {
+  const proto = Markdown.prototype as unknown as PatchedMarkdownPrototype;
+  const existing = proto[MARKDOWN_PATCH_STATE] as MarkdownPatchState | undefined;
+  if (existing?.installed) {
+    existing.renderCodeToken = renderCodeTokenWithoutFences;
+    return;
+  }
+
+  const original = proto.renderToken;
+  if (typeof original !== "function") return;
+
+  const state: MarkdownPatchState = {
+    installed: true,
+    original,
+    renderCodeToken: renderCodeTokenWithoutFences,
+  };
+  proto[MARKDOWN_PATCH_STATE] = state;
+
+  proto.renderToken = function (this: MarkdownRuntime, token: unknown, width: number, nextTokenType?: string, styleContext?: unknown): string[] {
+    const current = proto[MARKDOWN_PATCH_STATE] as MarkdownPatchState | undefined;
+    if (current && isMarkdownCodeToken(token)) return current.renderCodeToken(this, token, nextTokenType);
+    return (current?.original ?? original).call(this, token, width, nextTokenType, styleContext);
+  };
+}
 
 function imageChip(id: number): string {
   return `[image${id}]`;
@@ -326,6 +406,8 @@ function collectImageAttachments(text: string, attachments: Map<string, Attachme
 }
 
 export default function piBeautify(pi: ExtensionAPI) {
+  installMarkdownFencePatch();
+
   const attachments = new Map<string, Attachment>();
 
   pi.on("session_start", (_event, ctx) => {
