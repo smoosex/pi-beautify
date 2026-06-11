@@ -1,6 +1,6 @@
 {
   "name": "@smoose/pi-beautify",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Small visual polish extensions for pi coding agent",
   "type": "module",
   "files": [

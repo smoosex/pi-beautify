@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+
 import { CustomEditor, type AppKeybinding, type ExtensionAPI, type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, Markdown, matchesKey, truncateToWidth, type AutocompleteProvider, type EditorComponent, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 
@@ -9,8 +11,25 @@ interface Attachment {
 const CLIPBOARD_PATH_RE = /(?:[^\s"'`<>]+[\\/])?pi-clipboard-[0-9a-f-]+\.(?:png|jpe?g|webp|gif)/gi;
 const TOKEN_RE = /\[image(\d+)\]/g;
 const TOKEN_LINE_RE = /\[image\d+\]/g;
+const IMAGE_FILE_RE = /\.(?:png|jpe?g|webp|gif)$/i;
 const MARKDOWN_PATCH_STATE = Symbol.for("smoose.pi-beautify.markdown.patch");
 const PLAIN_CODE_LANGS = new Set(["", "text", "plain", "plaintext"]);
+const MACOS_CLIPBOARD_FILE_PATHS_SCRIPT = `
+ObjC.import('AppKit');
+ObjC.import('Foundation');
+const pb = $.NSPasteboard.generalPasteboard;
+const classes = $.NSArray.arrayWithObject($.NSURL);
+const options = $.NSDictionary.dictionaryWithObjectForKey($.NSNumber.numberWithBool(true), $.NSPasteboardURLReadingFileURLsOnlyKey);
+const urls = pb.readObjectsForClassesOptions(classes, options);
+const paths = [];
+if (urls) {
+  for (let i = 0; i < urls.count; i++) {
+    const url = urls.objectAtIndex(i);
+    if (url.isFileURL) paths.push(ObjC.unwrap(url.path));
+  }
+}
+JSON.stringify(paths);
+`;
 
 interface MarkdownCodeToken {
   type: "code";
@@ -98,6 +117,47 @@ function displayChip(token: string, theme: Theme): string {
   return theme.fg("toolDiffAdded", theme.inverse(token));
 }
 
+function readClipboardFilePaths(): string[] {
+  if (process.platform !== "darwin") return [];
+
+  const result = spawnSync("osascript", ["-l", "JavaScript", "-e", MACOS_CLIPBOARD_FILE_PATHS_SCRIPT], {
+    encoding: "utf8",
+    timeout: 700,
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) return [];
+
+  try {
+    const parsed: unknown = JSON.parse(result.stdout.trim() || "[]");
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set<string>();
+    return parsed.filter((path): path is string => {
+      if (typeof path !== "string" || path.length === 0 || seen.has(path)) return false;
+      seen.add(path);
+      return true;
+    });
+  } catch {
+    return [];
+  }
+}
+
+function pasteClipboardFilePaths(editor: EditorComponent, imageTokens: ImageTokenController, tui: TUI): boolean {
+  const paths = readClipboardFilePaths();
+  if (paths.length === 0) return false;
+
+  const text = imageTokens.formatClipboardFilePaths(paths, editor.getText());
+  if (!text) return false;
+
+  if (editor.insertTextAtCursor) {
+    editor.insertTextAtCursor(text);
+  } else {
+    editor.setText(editor.getText() + text);
+    editor.onChange?.(editor.getText());
+  }
+  tui.requestRender();
+  return true;
+}
+
 interface EditorInternals {
   state: { lines: string[]; cursorLine: number; cursorCol: number };
   historyIndex: number;
@@ -120,6 +180,12 @@ class ImageTokenController {
   replaceClipboardPathsInText(text: string, existingText = ""): string {
     const usedIds = this.collectUsedIds(`${existingText}\n${text}`);
     return text.replace(CLIPBOARD_PATH_RE, (path) => this.createImageToken(path, usedIds));
+  }
+
+  formatClipboardFilePaths(paths: string[], existingText = ""): string {
+    const usedIds = this.collectUsedIds(existingText);
+    const pieces = paths.map((path) => (IMAGE_FILE_RE.test(path) ? this.createImageToken(path, usedIds).trimEnd() : path));
+    return pieces.length > 0 ? `${pieces.join(paths.length > 1 ? "\n" : "")} ` : "";
   }
 
   replaceClipboardPathsInEditor(editor: EditorComponent, tui: TUI): void {
@@ -206,9 +272,15 @@ class BeautifyEditor extends CustomEditor {
 
   handleInput(data: string): void {
     const isImagePaste = this.appKeybindings.matches(data, "app.clipboard.pasteImage");
+    if (isImagePaste) {
+      if (this.onExtensionShortcut?.(data)) return;
+      if (pasteClipboardFilePaths(this, this.imageTokens, this.tui)) return;
+      this.onPasteImage?.();
+      this.scheduleClipboardPathScan();
+      return;
+    }
     if (this.imageTokens.deleteImageTokenAtCursor(this, data, this.tui)) return;
     super.handleInput(data);
-    if (isImagePaste) this.scheduleClipboardPathScan();
   }
 
   insertTextAtCursor(text: string): void {
@@ -336,6 +408,7 @@ class BeautifyEditorWrapper implements EditorComponent {
     if (this.onExtensionShortcut?.(data)) return;
     if (this.imageTokens.deleteImageTokenAtCursor(this.inner, data, this.tui)) return;
     if (isImagePaste) {
+      if (pasteClipboardFilePaths(this, this.imageTokens, this.tui)) return;
       this.onPasteImage?.();
       this.scheduleClipboardPathScan();
       return;
