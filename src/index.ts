@@ -184,8 +184,8 @@ class ImageTokenController {
 
   formatClipboardFilePaths(paths: string[], existingText = ""): string {
     const usedIds = this.collectUsedIds(existingText);
-    const pieces = paths.map((path) => (IMAGE_FILE_RE.test(path) ? this.createImageToken(path, usedIds).trimEnd() : path));
-    return pieces.length > 0 ? `${pieces.join(paths.length > 1 ? "\n" : "")} ` : "";
+    const pieces = paths.map((path) => (IMAGE_FILE_RE.test(path) ? this.createImageToken(path, usedIds) : path));
+    return pieces.join(paths.length > 1 ? "\n" : "");
   }
 
   replaceClipboardPathsInEditor(editor: EditorComponent, tui: TUI): void {
@@ -253,7 +253,7 @@ class ImageTokenController {
     usedIds.add(id);
     const token = imageChip(id);
     this.attachments.set(token, { token, path });
-    return `${token} `;
+    return token;
   }
 }
 
